@@ -317,3 +317,102 @@
     (ok thread-id)
   )
 )
+
+;; Reply Creation - Contribute to Discussion Thread
+(define-public (create-reply
+    (thread-id uint)
+    (content (string-utf8 1024))
+    (parent-reply-id (optional uint))
+  )
+  (let (
+      (reply-id (+ (var-get reply-counter) u1))
+      (current-time (get-current-time))
+      (thread-info (unwrap! (get-thread thread-id) ERR_NOT_FOUND))
+    )
+    ;; Core validation
+    (asserts! (is-user-staked tx-sender) ERR_INSUFFICIENT_STAKE)
+    (asserts! (not (get is-locked thread-info)) ERR_THREAD_LOCKED)
+    (asserts! (> (len content) u0) ERR_INVALID_AMOUNT)
+    ;; Validate parent reply relationship
+    (let ((validated-parent-reply-id (match parent-reply-id
+        parent-id (begin
+          (asserts! (is-valid-parent-reply parent-id thread-id)
+            ERR_INVALID_PARENT_REPLY
+          )
+          (some parent-id)
+        )
+        none
+      )))
+      ;; Premium access gate
+      (if (get is-premium thread-info)
+        (asserts! (has-premium-access thread-id tx-sender) ERR_THREAD_NOT_PREMIUM)
+        true
+      )
+      ;; Create reply entry
+      (map-set replies { reply-id: reply-id } {
+        thread-id: thread-id,
+        author: tx-sender,
+        content: content,
+        created-at: current-time,
+        upvotes: u0,
+        downvotes: u0,
+        tips-received: u0,
+        parent-reply-id: validated-parent-reply-id,
+      })
+      ;; Update thread reply counter
+      (map-set threads { thread-id: thread-id }
+        (merge thread-info { reply-count: (+ (get reply-count thread-info) u1) })
+      )
+      ;; Update user reputation
+      (let ((current-rep (get-user-reputation tx-sender)))
+        (map-set user-reputation { user: tx-sender }
+          (merge current-rep {
+            replies-created: (+ (get replies-created current-rep) u1),
+            reputation-score: (calculate-reputation-score (get total-upvotes current-rep)
+              (get total-downvotes current-rep)
+              (get threads-created current-rep)
+              (+ (get replies-created current-rep) u1)
+            ),
+          })
+        )
+      )
+      (var-set reply-counter reply-id)
+      (ok reply-id)
+    )
+  )
+)
+
+;; Premium Access Purchase - Unlock Exclusive Content
+(define-public (purchase-premium-access (thread-id uint))
+  (let (
+      (thread-info (unwrap! (get-thread thread-id) ERR_NOT_FOUND))
+      (current-time (get-current-time))
+    )
+    ;; Validation checks
+    (asserts! (get is-premium thread-info) ERR_THREAD_NOT_PREMIUM)
+    (asserts!
+      (is-none (map-get? premium-access {
+        thread-id: thread-id,
+        user: tx-sender,
+      }))
+      ERR_UNAUTHORIZED
+    )
+    (let (
+        (price (get premium-price thread-info))
+        (author (get author thread-info))
+        (platform-fee (calculate-platform-fee price))
+        (author-payment (- price platform-fee))
+      )
+      ;; Execute STX transfers
+      (try! (stx-transfer? author-payment tx-sender author))
+      (try! (stx-transfer? platform-fee tx-sender (var-get platform-treasury)))
+      ;; Grant premium access
+      (map-set premium-access {
+        thread-id: thread-id,
+        user: tx-sender,
+      } { purchased-at: current-time }
+      )
+      (ok true)
+    )
+  )
+)
